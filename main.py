@@ -10,6 +10,8 @@ def main() -> None:
     scraper = ServatmandiScraperModel(
         url=config.URL,
         targets=config.SCRAPE_TARGETS,
+        aliases=getattr(config, "SCRAPE_ALIASES", None),
+        multipliers=getattr(config, "ITEM_MULTIPLIERS", None),
     )
     history = HistoryModel(
         excel_path=config.EXCEL_FILE,

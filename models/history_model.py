@@ -15,9 +15,10 @@ class HistoryModel:
         self.targets = targets
         self.headers = ["Date"] + targets
 
-    def load_all_records(self) -> Dict[str, Dict[str, float]]:
+    def load_all_records(self) -> Dict[str, Dict[str, int]]:
         """
-        Returns historical records keyed by ISO date string ('YYYY-MM-DD').
+        Returns historical records keyed by ISO date string ('YYYY-MM-DD')
+        with whole-integer values.
         """
         if not self.excel_path.exists():
             return {}
@@ -34,7 +35,7 @@ class HistoryModel:
         header_row = [str(h).strip() if h is not None else "" for h in rows[0]]
         date_col_idx = header_row.index("Date") if "Date" in header_row else 0
 
-        records: Dict[str, Dict[str, float]] = {}
+        records: Dict[str, Dict[str, int]] = {}
 
         for row in rows[1:]:
             if not row or all(cell is None for cell in row):
@@ -48,7 +49,7 @@ class HistoryModel:
             if not DATE_PATTERN.match(row_date):
                 continue
 
-            entry: Dict[str, float] = {}
+            entry: Dict[str, int] = {}
             for idx, col_name in enumerate(header_row):
                 if idx == date_col_idx or not col_name:
                     continue
@@ -57,7 +58,7 @@ class HistoryModel:
                     if isinstance(val, str) and DATE_PATTERN.match(val.strip()):
                         continue
                     try:
-                        entry[col_name] = float(val)
+                        entry[col_name] = int(round(float(val)))
                     except (ValueError, TypeError):
                         continue
 
@@ -67,26 +68,27 @@ class HistoryModel:
 
     def upsert_day_record(
         self, target_date: date, prices: Dict[str, float]
-    ) -> Dict[str, Dict[str, float]]:
+    ) -> Dict[str, Dict[str, int]]:
         """
         Inserts or updates `target_date` in the in-memory history dict and returns
-        the chronologically sorted records.
+        the chronologically sorted records as whole integers.
         """
         records = self.load_all_records()
         date_key = target_date.isoformat()
         existing = records.get(date_key, {})
-        merged = {**existing, **prices}
+        cleaned_prices = {k: int(round(v)) for k, v in prices.items() if v is not None}
+        merged = {**existing, **cleaned_prices}
         records[date_key] = merged
         return dict(sorted(records.items(), key=lambda x: x[0]))
 
     def compute_day_comparison(
         self,
-        records: Dict[str, Dict[str, float]],
+        records: Dict[str, Dict[str, int]],
         target_date: date,
         report_targets: Optional[List[str]] = None,
     ) -> List[Dict]:
         """
-        Computes yesterday/previous-day comparison for `report_targets`.
+        Computes yesterday/previous-day comparison for `report_targets` using integers.
         """
         date_key = target_date.isoformat()
         if date_key not in records:
@@ -102,7 +104,9 @@ class HistoryModel:
             yest_val = prev_data.get(item) if prev_data else None
 
             if today_val is not None and yest_val is not None:
-                diff = today_val - yest_val
+                today_int = int(round(today_val))
+                yest_int = int(round(yest_val))
+                diff = today_int - yest_int
                 if diff > 0:
                     direction = "▲"
                     status = "up"
@@ -113,8 +117,10 @@ class HistoryModel:
                     direction = "—"
                     status = "unchanged"
 
-                pct = (diff / yest_val) * 100 if yest_val != 0 else None
+                pct = round((diff / yest_int) * 100, 1) if yest_int != 0 else None
             else:
+                today_int = int(round(today_val)) if today_val is not None else None
+                yest_int = int(round(yest_val)) if yest_val is not None else None
                 diff = None
                 pct = None
                 direction = "—"
@@ -125,19 +131,20 @@ class HistoryModel:
                     "item": item,
                     "date": date_key,
                     "previous_date": prev_key,
-                    "today": today_val,
-                    "yesterday": yest_val,
+                    "today": today_int,
+                    "yesterday": yest_int,
                     "diff": diff,
                     "pct": pct,
                     "direction": direction,
                     "status": status,
                 }
             )
+
         return comparison
 
     def _find_previous_day(
-        self, records: Dict[str, Dict[str, float]], target_date: date
-    ) -> Tuple[Optional[str], Optional[Dict[str, float]]]:
+        self, records: Dict[str, Dict[str, int]], target_date: date
+    ) -> Tuple[Optional[str], Optional[Dict[str, int]]]:
         yesterday_key = (target_date - timedelta(days=1)).isoformat()
         if yesterday_key in records:
             return yesterday_key, records[yesterday_key]

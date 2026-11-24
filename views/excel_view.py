@@ -6,6 +6,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from models.text_maker_model import TextMakerModel
 
+
 DEFAULT_REPORT_HEADERS: Dict[str, str] = {
     "item": "شرح نرخ",
     "current": "نرخ فعلی",
@@ -23,6 +24,20 @@ DEFAULT_REPORT_COLUMNS: List[str] = [
     "change",
     "change_pct",
 ]
+
+FONT_FAMILY = "B Titr"
+
+
+def _to_int(val):
+    if isinstance(val, (int, float)):
+        return int(round(val))
+    return val
+
+
+def _to_one_decimal(val):
+    if isinstance(val, (int, float)):
+        return round(float(val), 1)
+    return val
 
 
 def _to_argb(hex_color: str) -> str:
@@ -76,7 +91,7 @@ class ExcelView:
         show_pct_change: bool = True,
         color_change_with_direction: bool = True,
         direction: str = "ltr",
-        text_maker: Optional[TextMakerModel] = None
+        text_maker: Optional[TextMakerModel] = None,
     ):
         self.excel_path = excel_path
         self.history_sheet_name = history_sheet_name
@@ -111,17 +126,7 @@ class ExcelView:
     def is_rtl(self) -> bool:
         return self.direction == "rtl"
 
-    def _format_item_label(self, raw_item: str) -> str:
-        affix = self.item_affixes.get(raw_item, {})
-        prefix = affix.get("prefix", "")
-        suffix = affix.get("suffix", "")
-        return f"{prefix}{raw_item}{suffix}"
-
     def ensure_file_unlocked(self) -> None:
-        """
-        If the target Excel file is currently open/locked, prompts the user
-        to close it and press any key to continue.
-        """
         while _is_file_locked(self.excel_path):
             print(
                 f"'{self.excel_path}' is currently open. "
@@ -138,15 +143,12 @@ class ExcelView:
         return wb
 
     def save_daily_history(self, records: Dict[str, Dict[str, float]]) -> Path:
-        """
-        Writes all chronological daily records into the history sheet (e.g., Daily_Data).
-        Keeps column order as ['Date', ...items] so historical parsing remains reliable.
-        """
         wb = self._load_or_create_workbook()
 
         if self.history_sheet_name in wb.sheetnames:
-            ws = wb[self.history_sheet_name]
-            ws.delete_rows(1, ws.max_row)
+            idx = wb.sheetnames.index(self.history_sheet_name)
+            wb.remove(wb[self.history_sheet_name])
+            ws = wb.create_sheet(title=self.history_sheet_name, index=idx)
         else:
             ws = wb.create_sheet(title=self.history_sheet_name)
 
@@ -162,14 +164,21 @@ class ExcelView:
         ws.append(headers)
 
         for date_key, values in records.items():
-            row = [date_key] + [values.get(item) for item in dynamic_items]
+            row = [date_key] + [_to_int(values.get(item)) for item in dynamic_items]
             ws.append(row)
 
-        for row_idx in range(2, ws.max_row + 1):
-            for col_idx in range(2, len(headers) + 1):
+        for row_idx in range(1, ws.max_row + 1):
+            for col_idx in range(1, len(headers) + 1):
                 cell = ws.cell(row=row_idx, column=col_idx)
-                if isinstance(cell.value, (int, float)):
-                    cell.number_format = "#,##0.##"
+                cell.font = Font(
+                    name=FONT_FAMILY,
+                    size=11,
+                    bold=(row_idx == 1),
+                    color="000000",
+                )
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                if row_idx >= 2 and col_idx >= 2 and isinstance(cell.value, (int, float)):
+                    cell.number_format = "#,##0"
 
         for col_idx, header in enumerate(headers, start=1):
             col_letter = get_column_letter(col_idx)
@@ -185,49 +194,45 @@ class ExcelView:
         comparison_rows: List[Dict],
         previous_date_str: Optional[str] = None,
     ) -> Path:
-        """
-        Generates or updates the themed report sheet (e.g., Daily_Report) for a specific day,
-        following the exact column order specified in `report_columns`.
-        """
         wb = self._load_or_create_workbook()
 
         if self.report_sheet_name in wb.sheetnames:
-            ws = wb[self.report_sheet_name]
-            ws.delete_rows(1, ws.max_row)
+            idx = wb.sheetnames.index(self.report_sheet_name)
+            wb.remove(wb[self.report_sheet_name])
+            ws = wb.create_sheet(title=self.report_sheet_name, index=idx)
         else:
             ws = wb.create_sheet(title=self.report_sheet_name)
 
         ws.sheet_view.rightToLeft = self.is_rtl
-        title_text = self.text_maker.format_report_title(
-            report_date_str=report_date_str,
-            previous_date_str=previous_date_str,
-        )
+
         valid_keys = set(DEFAULT_REPORT_COLUMNS)
         header_specs = []
         for col_key in self.report_columns:
             if col_key not in valid_keys:
-                raise ValueError(f"Unknown report column key: '{col_key}'")
+                continue
             if col_key == "change" and not self.show_number_change:
                 continue
             if col_key == "change_pct" and not self.show_pct_change:
                 continue
             header_specs.append((col_key, self.headers_map[col_key]))
 
-        headers = [label for _, label in header_specs]
-        num_cols = max(len(headers), 1)
+        if not header_specs:
+            header_specs = [("item", self.headers_map["item"])]
 
-        # Title banner (Row 1)
-        prev_label = previous_date_str if previous_date_str else "N/A"
-        if self.report_title:
-            title_text = f"{self.report_title} — {report_date_str} (vs. {prev_label})"
-        else:
-            title_text = f"Daily Market Report — {report_date_str} (vs. {prev_label})"
+        headers = [label for _, label in header_specs]
+        num_cols = len(headers)
+
+        # Row 1: Title banner & date — B Titr, size 20, centered
+        title_text = self.text_maker.format_report_title(
+            report_date_str=report_date_str,
+            previous_date_str=previous_date_str,
+        )
 
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
         title_cell = ws.cell(row=1, column=1, value=title_text)
         title_cell.font = Font(
-            name="Calibri",
-            size=13,
+            name=FONT_FAMILY,
+            size=20,
             bold=True,
             color=_to_argb(self.colors["header_fg"]),
         )
@@ -237,21 +242,20 @@ class ExcelView:
             fill_type="solid",
         )
         title_cell.alignment = Alignment(
-            horizontal="right" if self.is_rtl else "left",
+            horizontal="center",
             vertical="center",
-            indent=1,
         )
-        ws.row_dimensions[1].height = 28
+        ws.row_dimensions[1].height = 34
 
-        # Column headers (Row 2)
+        # Row 2: Column headers (including شرح نرخ) — B Titr, size 18, centered
         header_fill = PatternFill(
             start_color=_to_argb(self.colors["header_bg"]),
             end_color=_to_argb(self.colors["header_bg"]),
             fill_type="solid",
         )
         header_font = Font(
-            name="Calibri",
-            size=11,
+            name=FONT_FAMILY,
+            size=18,
             bold=True,
             color=_to_argb(self.colors["header_fg"]),
         )
@@ -260,14 +264,14 @@ class ExcelView:
             left=thin_side, right=thin_side, top=thin_side, bottom=thin_side
         )
 
-        ws.row_dimensions[2].height = 24
-        for col_idx, (col_key, col_name) in enumerate(header_specs, start=1):
+        ws.row_dimensions[2].height = 30
+        for col_idx, (_, col_name) in enumerate(header_specs, start=1):
             h_cell = ws.cell(row=2, column=col_idx, value=col_name)
             h_cell.fill = header_fill
             h_cell.font = header_font
             h_cell.border = cell_border
             h_cell.alignment = Alignment(
-                horizontal="right" if col_key == "item" else "center",
+                horizontal="center",
                 vertical="center",
             )
 
@@ -292,7 +296,7 @@ class ExcelView:
 
         for idx, entry in enumerate(comparison_rows):
             excel_row = idx + 3
-            ws.row_dimensions[excel_row].height = 22
+            ws.row_dimensions[excel_row].height = 24
 
             is_even = idx % 2 == 0
             row_fill = row_even_fill if is_even else row_odd_fill
@@ -310,10 +314,10 @@ class ExcelView:
 
             delta_hex = dir_hex if self.color_change_with_direction else neutral_change_hex
 
-            today_val = entry.get("today")
-            yest_val = entry.get("yesterday")
-            diff_val = entry.get("diff")
-            pct_val = entry.get("pct")
+            today_val = _to_int(entry.get("today"))
+            yest_val = _to_int(entry.get("yesterday"))
+            diff_val = _to_int(entry.get("diff"))
+            pct_val = _to_one_decimal(entry.get("pct"))
             direction_symbol = entry.get("direction", "—")
 
             values_by_key: Dict[str, object] = {
@@ -330,47 +334,34 @@ class ExcelView:
                 cell = ws.cell(row=excel_row, column=col_idx, value=val)
                 cell.fill = row_fill
                 cell.border = cell_border
+                cell.alignment = Alignment(horizontal="center", vertical="center")
 
                 if col_key == "item":
                     cell.font = Font(
-                        name="Calibri", size=11, bold=True, color=base_text_hex
+                        name=FONT_FAMILY, size=18, bold=True, color=base_text_hex
                     )
-                    cell.alignment = Alignment(horizontal="right", vertical="center")
                 elif col_key in ("current", "previous"):
                     cell.font = Font(
-                        name="Calibri", size=11, bold=False, color=base_text_hex
-                    )
-                    cell.alignment = Alignment(
-                        horizontal="left" if self.is_rtl else "right",
-                        vertical="center",
+                        name=FONT_FAMILY, size=18, bold=True, color=base_text_hex
                     )
                     if isinstance(val, (int, float)):
-                        cell.number_format = "#,##0.##"
+                        cell.number_format = "#,##0"
                 elif col_key == "trend":
                     cell.font = Font(
-                        name="Calibri", size=12, bold=True, color=dir_hex
+                        name=FONT_FAMILY, size=18, bold=True, color=dir_hex
                     )
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
                 elif col_key == "change":
                     cell.font = Font(
-                        name="Calibri", size=11, bold=True, color=delta_hex
-                    )
-                    cell.alignment = Alignment(
-                        horizontal="left" if self.is_rtl else "right",
-                        vertical="center",
+                        name=FONT_FAMILY, size=18, bold=True, color=delta_hex
                     )
                     if isinstance(val, (int, float)):
-                        cell.number_format = "+#,##0.##;-#,##0.##;0"
+                        cell.number_format = "+#,##0;-#,##0;0"
                 elif col_key == "change_pct":
                     cell.font = Font(
-                        name="Calibri", size=11, bold=True, color=delta_hex
-                    )
-                    cell.alignment = Alignment(
-                        horizontal="left" if self.is_rtl else "right",
-                        vertical="center",
+                        name=FONT_FAMILY, size=18, bold=True, color=delta_hex
                     )
                     if isinstance(val, (int, float)):
-                        cell.number_format = "+0.00%;-0.00%;0.00%"
+                        cell.number_format = "+0.0%;-0.0%;0.0%"
 
         for col_idx, (col_key, col_name) in enumerate(header_specs, start=1):
             col_letter = get_column_letter(col_idx)

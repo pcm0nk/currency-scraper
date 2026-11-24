@@ -28,11 +28,20 @@ class TextMakerModel:
         self.report_title = report_title
 
     def format_item_label(self, raw_item: str) -> str:
-        """Applies configured prefix (pretext) and suffix (post-text) to an item name."""
+        """
+        Formats an item's report label using an optional replacement label (`label` or `replace`)
+        plus configured `prefix` and `suffix` without altering `raw_item` for history/math.
+        """
         affix = self.item_affixes.get(raw_item, {})
+        base_label = affix.get("label")
+        if base_label is None:
+            base_label = affix.get("replace")
+        if base_label is None:
+            base_label = raw_item
+
         prefix = affix.get("prefix", "")
         suffix = affix.get("suffix", "")
-        return f"{prefix}{raw_item}{suffix}"
+        return f"{prefix}{base_label}{suffix}"
 
     @staticmethod
     def gregorian_to_jalali(g_year: int, g_month: int, g_day: int) -> tuple[int, int, int]:

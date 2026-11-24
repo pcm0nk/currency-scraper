@@ -1,7 +1,7 @@
 from datetime import date
 from typing import List, Optional
-from models.history_model import HistoryModel
 from models.scraper_model import ServatmandiScraperModel
+from models.history_model import HistoryModel
 from views.excel_view import ExcelView
 
 
@@ -20,27 +20,33 @@ class TrackerController:
 
     def run_daily_capture(self, target_date: Optional[date] = None) -> None:
         run_date = target_date or date.today()
-        date_str = run_date.isoformat()
+        print(f"Scraping live prices for {run_date.isoformat()}...")
 
-        print(f"Scraping live prices for {date_str}...")
         prices = self.scraper.scrape_prices()
-
-        for item, val in prices.items():
-            print(f"  {item}: {val:,.2f}")
+        for name, val in prices.items():
+            if isinstance(val, float) and val.is_integer():
+                print(f"  {name}: {int(val):,}")
+            elif isinstance(val, int):
+                print(f"  {name}: {val:,}")
+            else:
+                print(f"  {name}: {val}")
 
         records = self.history.upsert_day_record(run_date, prices)
-        comparison_rows = self.history.compute_day_comparison(
+        self.view.save_daily_history(records)
+
+        comparison = self.history.compute_day_comparison(
             records=records,
             target_date=run_date,
             report_targets=self.report_targets,
         )
+        print(f"Report rows built: {len(comparison)}")
 
-        prev_date_str = comparison_rows[0]["previous_date"] if comparison_rows else None
-
-        self.view.save_daily_history(records)
+        prev_date = comparison[0]["previous_date"] if comparison else None
         saved_path = self.view.save_daily_report(
-            report_date_str=date_str,
-            comparison_rows=comparison_rows,
-            previous_date_str=prev_date_str,
+            report_date_str=run_date.isoformat(),
+            comparison_rows=comparison,
+            previous_date_str=prev_date,
         )
-        print(f"Saved updated workbook to: {saved_path}")
+        print(
+            f"Updated history and generated '{self.view.report_sheet_name}' in: {saved_path}"
+        )
