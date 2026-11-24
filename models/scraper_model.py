@@ -7,6 +7,10 @@ PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "0123
 TIME_PATTERN = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
 PCT_ONLY_PATTERN = re.compile(r"^[+-]?\d+(?:\.\d+)?\s*%$")
 
+EXCLUDED_TERMS_BY_TARGET: Dict[str, List[str]] = {
+    "دلار آمریکا": ["حواله دولتی"],
+}
+
 
 class ServatmandiScraperModel:
     def __init__(
@@ -39,7 +43,11 @@ class ServatmandiScraperModel:
     @classmethod
     def _parse_number(cls, raw_text: str) -> Optional[float]:
         normalized = cls._normalize_text(raw_text).translate(PERSIAN_DIGITS)
-        if not normalized or TIME_PATTERN.match(normalized) or PCT_ONLY_PATTERN.match(normalized):
+        if (
+            not normalized
+            or TIME_PATTERN.match(normalized)
+            or PCT_ONLY_PATTERN.match(normalized)
+        ):
             return None
         match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", normalized)
         if not match:
@@ -52,9 +60,18 @@ class ServatmandiScraperModel:
         except ValueError:
             return None
 
-    def scrape_prices(self, targets: Optional[List[str]] = None) -> Dict[str, int]:
+    def _is_valid_label_text(
+        self, norm_text: str, norm_term: str, excluded_terms: List[str]
+    ) -> bool:
+        if not norm_text or norm_term not in norm_text:
+            return False
+        if any(ex and ex in norm_text for ex in excluded_terms):
+            return False
+        return True
+
+    def scrape_prices(self, targets: Optional[List[str]] = None) -> Dict[str, float]:
         items_to_scrape = targets if targets is not None else self.targets
-        results: Dict[str, int] = {}
+        results: Dict[str, float] = {}
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=self.headless)
@@ -63,41 +80,103 @@ class ServatmandiScraperModel:
             page.goto(self.url, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
 
+            # Scroll through the page so lower sections/watchlists load and populate
+            page.evaluate(
+                r"""async () => {
+                    const step = Math.max(400, Math.floor(window.innerHeight * 0.8));
+                    let y = 0;
+                    const maxScroll = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+                    while (y < maxScroll) {
+                        y += step;
+                        window.scrollTo(0, y);
+                        await new Promise(r => setTimeout(r, 250));
+                    }
+                    window.scrollTo(0, 0);
+                }"""
+            )
+            page.wait_for_timeout(1500)
+
             extracted = page.evaluate(
                 r"""() => {
                     const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+                    const isVisible = (el) => {
+                        const style = window.getComputedStyle(el);
+                        if (!style || style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
+                            return false;
+                        }
+                        const rect = el.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    };
 
                     const rowsOut = [];
-                    const allRows = Array.from(
-                        document.querySelectorAll('tr, [role="row"], li, .price-row, .row')
-                    );
+                    const seenKeys = new Set();
+                    const tables = Array.from(document.querySelectorAll('table'));
 
-                    for (const row of allRows) {
-                        const fullText = clean(row.innerText);
-                        if (!fullText || fullText.length > 350) continue;
-
-                        let cellEls = Array.from(row.querySelectorAll('td, th, [role="cell"]'));
-                        if (cellEls.length === 0) {
-                            cellEls = Array.from(row.children).filter(el => clean(el.innerText).length > 0);
-                        }
-                        if (cellEls.length < 2) continue;
-
+                    for (const tbl of tables) {
+                        if (!isVisible(tbl)) continue;
+                        const headers = Array.from(tbl.querySelectorAll('thead th, th')).filter(isVisible);
                         let lastValColIdx = -1;
-                        const parentContainer = row.closest('table, [role="table"], [role="grid"], section, .table-wrapper') || document;
-                        const headers = Array.from(
-                            parentContainer.querySelectorAll('thead th, th, [role="columnheader"]')
-                        );
                         headers.forEach((h, idx) => {
-                            if (clean(h.innerText).includes('آخرین مقدار')) {
+                            const hText = clean(h.innerText);
+                            if (hText.includes('آخرین مقدار') || hText.includes('آخرین قیمت')) {
                                 lastValColIdx = idx;
                             }
                         });
 
-                        const cells = cellEls.map(c => clean(c.innerText));
+                        const trs = Array.from(tbl.querySelectorAll('tbody tr, tr'));
+                        for (const tr of trs) {
+                            if (!isVisible(tr)) continue;
+                            const fullText = clean(tr.innerText);
+                            if (!fullText) continue;
+
+                            const nameEls = Array.from(tr.querySelectorAll('.name a, .name, a'));
+                            const nameTexts = nameEls
+                                .map(el => clean(el.innerText))
+                                .filter(Boolean);
+
+                            let cellEls = Array.from(tr.querySelectorAll('th, td')).filter(isVisible);
+                            if (cellEls.length === 0) {
+                                cellEls = Array.from(tr.querySelectorAll('th, td'));
+                            }
+                            const cells = cellEls.map(c => clean(c.innerText));
+
+                            const key = `${fullText}||${cells.join('|')}`;
+                            if (seenKeys.has(key)) continue;
+                            seenKeys.add(key);
+
+                            rowsOut.push({
+                                nameTexts: nameTexts,
+                                cells: cells,
+                                fullText: fullText,
+                                lastValColIdx: lastValColIdx
+                            });
+                        }
+                    }
+
+                    // Also capture visible non-table row/card containers
+                    const cardCandidates = Array.from(
+                        document.querySelectorAll('[role="row"], li, .price-row, .row, div')
+                    );
+                    for (const el of cardCandidates) {
+                        if (!isVisible(el)) continue;
+                        const fullText = clean(el.innerText);
+                        if (!fullText || fullText.length > 350) continue;
+
+                        const childCells = Array.from(el.children).filter(
+                            c => isVisible(c) && clean(c.innerText).length > 0
+                        );
+                        if (childCells.length < 2 || childCells.length > 10) continue;
+
+                        const cells = childCells.map(c => clean(c.innerText));
+                        const key = `${fullText}||${cells.join('|')}`;
+                        if (seenKeys.has(key)) continue;
+                        seenKeys.add(key);
+
                         rowsOut.push({
+                            nameTexts: cells,
                             cells: cells,
                             fullText: fullText,
-                            lastValColIdx: lastValColIdx
+                            lastValColIdx: -1
                         });
                     }
 
@@ -112,6 +191,11 @@ class ServatmandiScraperModel:
             if target not in search_terms:
                 search_terms = [target] + search_terms
 
+            excluded_terms = [
+                self._normalize_for_match(ex)
+                for ex in EXCLUDED_TERMS_BY_TARGET.get(target, [])
+            ]
+
             parsed_val: Optional[float] = None
 
             for term in search_terms:
@@ -121,29 +205,56 @@ class ServatmandiScraperModel:
                     norm_full = self._normalize_for_match(row["fullText"])
                     if norm_term not in norm_full:
                         continue
+                    if any(ex and ex in norm_full for ex in excluded_terms):
+                        continue
 
                     raw_cells = [self._normalize_text(c) for c in row["cells"]]
+                    norm_cells = [self._normalize_for_match(c) for c in raw_cells]
+
+                    has_label = any(
+                        self._is_valid_label_text(nc, norm_term, excluded_terms)
+                        for nc in norm_cells
+                    ) or any(
+                        self._is_valid_label_text(self._normalize_for_match(n), norm_term, excluded_terms)
+                        for n in row.get("nameTexts", [])
+                    )
+                    if not has_label:
+                        continue
+
+                    label_cell_indices = {
+                        i
+                        for i, nc in enumerate(norm_cells)
+                        if norm_term in nc
+                    }
+
                     col_idx = row.get("lastValColIdx", -1)
 
-                    if 0 <= col_idx < len(raw_cells):
+                    # 1. Use 'آخرین مقدار' / 'آخرین قیمت' column index if valid and not a label cell
+                    if 0 <= col_idx < len(raw_cells) and col_idx not in label_cell_indices:
                         val = self._parse_number(raw_cells[col_idx])
                         if val is not None:
                             parsed_val = val
                             break
 
-                    label_indices = {
-                        i
-                        for i, c in enumerate(raw_cells)
-                        if norm_term in self._normalize_for_match(c)
-                    }
-
-                    for i, c in enumerate(raw_cells):
-                        if i in label_indices:
+                    # 2. First valid price cell after the label cell
+                    max_label_idx = max(label_cell_indices) if label_cell_indices else -1
+                    for i in range(max_label_idx + 1, len(raw_cells)):
+                        if i in label_cell_indices:
                             continue
-                        val = self._parse_number(c)
+                        val = self._parse_number(raw_cells[i])
                         if val is not None:
                             parsed_val = val
                             break
+
+                    # 3. Fallback across any other non-label cell in the row
+                    if parsed_val is None:
+                        for i, c in enumerate(raw_cells):
+                            if i in label_cell_indices:
+                                continue
+                            val = self._parse_number(c)
+                            if val is not None:
+                                parsed_val = val
+                                break
 
                     if parsed_val is not None:
                         break
@@ -153,7 +264,7 @@ class ServatmandiScraperModel:
 
             if parsed_val is not None:
                 factor = self.multipliers.get(target, 1.0)
-                results[target] = int(round(parsed_val * factor))
+                results[target] = parsed_val * factor
             else:
                 print(f"  [Warning] Could not find 'آخرین مقدار' for: {target}")
 
