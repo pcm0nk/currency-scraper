@@ -1,5 +1,8 @@
+import json
 import re
-from typing import Dict, List, Optional
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 from playwright.sync_api import sync_playwright
 
 
@@ -11,6 +14,20 @@ EXCLUDED_TERMS_BY_TARGET: Dict[str, List[str]] = {
     "دلار آمریکا": ["حواله دولتی"],
 }
 
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+SAME_SITE_MAP: Dict[str, str] = {
+    "strict": "Strict",
+    "lax": "Lax",
+    "none": "None",
+    "no_restriction": "None",
+    "unspecified": "Lax",
+}
+
 
 class ServatmandiScraperModel:
     def __init__(
@@ -19,7 +36,9 @@ class ServatmandiScraperModel:
         targets: List[str],
         aliases: Optional[Dict[str, List[str]]] = None,
         multipliers: Optional[Dict[str, float]] = None,
-        headless: bool = True,
+        headless: bool = False,
+        keep_open: bool = True,
+        cookies_path: Optional[str] = "output/cookies.json",
         timeout_ms: int = 30000,
     ):
         self.url = url
@@ -27,7 +46,13 @@ class ServatmandiScraperModel:
         self.aliases = aliases or {}
         self.multipliers = multipliers or {}
         self.headless = headless
+        self.keep_open = keep_open
+        self.cookies_path = cookies_path
         self.timeout_ms = timeout_ms
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._page = None
 
     @staticmethod
     def _normalize_text(text: str) -> str:
@@ -70,121 +95,186 @@ class ServatmandiScraperModel:
             return False
         return True
 
+    @staticmethod
+    def _sanitize_cookie(raw: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw, dict):
+            return None
+        name = raw.get("name")
+        value = raw.get("value")
+        if not name or value is None:
+            return None
+
+        cookie: Dict[str, Any] = {
+            "name": str(name),
+            "value": str(value),
+        }
+
+        if raw.get("url"):
+            cookie["url"] = str(raw["url"])
+        else:
+            if raw.get("domain"):
+                cookie["domain"] = str(raw["domain"])
+            cookie["path"] = str(raw.get("path") or "/")
+
+        expires = raw.get("expires", raw.get("expirationDate"))
+        if expires is not None and not raw.get("session"):
+            try:
+                cookie["expires"] = float(expires)
+            except (TypeError, ValueError):
+                pass
+
+        if "httpOnly" in raw and raw["httpOnly"] is not None:
+            cookie["httpOnly"] = bool(raw["httpOnly"])
+        if "secure" in raw and raw["secure"] is not None:
+            cookie["secure"] = bool(raw["secure"])
+
+        raw_same_site = raw.get("sameSite")
+        if raw_same_site is not None:
+            mapped = SAME_SITE_MAP.get(str(raw_same_site).strip().lower())
+            if mapped:
+                cookie["sameSite"] = mapped
+            else:
+                cookie["sameSite"] = "None"
+
+        return cookie
+
+    def _load_cookies(self, context) -> None:
+        if not self.cookies_path:
+            return
+        path = Path(self.cookies_path)
+        if not path.exists():
+            return
+        try:
+            raw_cookies = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw_cookies, list):
+                return
+            sanitized = [
+                c for item in raw_cookies if (c := self._sanitize_cookie(item)) is not None
+            ]
+            if sanitized:
+                context.add_cookies(sanitized)
+                print(f"Loaded {len(sanitized)} cookies from {path}")
+        except Exception as exc:
+            print(f"  [Warning] Failed to load cookies from {path}: {exc}")
+
     def scrape_prices(self, targets: Optional[List[str]] = None) -> Dict[str, float]:
         items_to_scrape = targets if targets is not None else self.targets
         results: Dict[str, float] = {}
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=self.headless)
-            page = browser.new_page()
-            page.set_default_timeout(self.timeout_ms)
-            page.goto(self.url, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+        self.close_browser()
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.launch(headless=self.headless)
+        self._context = self._browser.new_context(user_agent=DESKTOP_USER_AGENT)
+        self._load_cookies(self._context)
 
-            # Scroll through the page so lower sections/watchlists load and populate
-            page.evaluate(
-                r"""async () => {
-                    const step = Math.max(400, Math.floor(window.innerHeight * 0.8));
-                    let y = 0;
-                    const maxScroll = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-                    while (y < maxScroll) {
-                        y += step;
-                        window.scrollTo(0, y);
-                        await new Promise(r => setTimeout(r, 250));
+        page = self._context.new_page()
+        self._page = page
+        page.set_default_timeout(self.timeout_ms)
+        page.goto(self.url, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+
+        # Scroll through the page so lower sections/watchlists load and populate
+        page.evaluate(
+            r"""async () => {
+                const step = Math.max(400, Math.floor(window.innerHeight * 0.8));
+                let y = 0;
+                const maxScroll = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+                while (y < maxScroll) {
+                    y += step;
+                    window.scrollTo(0, y);
+                    await new Promise(r => setTimeout(r, 250));
+                }
+                window.scrollTo(0, 0);
+            }"""
+        )
+        page.wait_for_timeout(1500)
+
+        extracted = page.evaluate(
+            r"""() => {
+                const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+                const isVisible = (el) => {
+                    const style = window.getComputedStyle(el);
+                    if (!style || style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
+                        return false;
                     }
-                    window.scrollTo(0, 0);
-                }"""
-            )
-            page.wait_for_timeout(1500)
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                };
 
-            extracted = page.evaluate(
-                r"""() => {
-                    const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
-                    const isVisible = (el) => {
-                        const style = window.getComputedStyle(el);
-                        if (!style || style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
-                            return false;
+                const rowsOut = [];
+                const seenKeys = new Set();
+                const tables = Array.from(document.querySelectorAll('table'));
+
+                for (const tbl of tables) {
+                    if (!isVisible(tbl)) continue;
+                    const headers = Array.from(tbl.querySelectorAll('thead th, th')).filter(isVisible);
+                    let lastValColIdx = -1;
+                    headers.forEach((h, idx) => {
+                        const hText = clean(h.innerText);
+                        if (hText.includes('آخرین مقدار') || hText.includes('آخرین قیمت')) {
+                            lastValColIdx = idx;
                         }
-                        const rect = el.getBoundingClientRect();
-                        return rect.width > 0 && rect.height > 0;
-                    };
+                    });
 
-                    const rowsOut = [];
-                    const seenKeys = new Set();
-                    const tables = Array.from(document.querySelectorAll('table'));
+                    const trs = Array.from(tbl.querySelectorAll('tbody tr, tr'));
+                    for (const tr of trs) {
+                        if (!isVisible(tr)) continue;
+                        const fullText = clean(tr.innerText);
+                        if (!fullText) continue;
 
-                    for (const tbl of tables) {
-                        if (!isVisible(tbl)) continue;
-                        const headers = Array.from(tbl.querySelectorAll('thead th, th')).filter(isVisible);
-                        let lastValColIdx = -1;
-                        headers.forEach((h, idx) => {
-                            const hText = clean(h.innerText);
-                            if (hText.includes('آخرین مقدار') || hText.includes('آخرین قیمت')) {
-                                lastValColIdx = idx;
-                            }
-                        });
+                        const nameEls = Array.from(tr.querySelectorAll('.name a, .name, a'));
+                        const nameTexts = nameEls
+                            .map(el => clean(el.innerText))
+                            .filter(Boolean);
 
-                        const trs = Array.from(tbl.querySelectorAll('tbody tr, tr'));
-                        for (const tr of trs) {
-                            if (!isVisible(tr)) continue;
-                            const fullText = clean(tr.innerText);
-                            if (!fullText) continue;
-
-                            const nameEls = Array.from(tr.querySelectorAll('.name a, .name, a'));
-                            const nameTexts = nameEls
-                                .map(el => clean(el.innerText))
-                                .filter(Boolean);
-
-                            let cellEls = Array.from(tr.querySelectorAll('th, td')).filter(isVisible);
-                            if (cellEls.length === 0) {
-                                cellEls = Array.from(tr.querySelectorAll('th, td'));
-                            }
-                            const cells = cellEls.map(c => clean(c.innerText));
-
-                            const key = `${fullText}||${cells.join('|')}`;
-                            if (seenKeys.has(key)) continue;
-                            seenKeys.add(key);
-
-                            rowsOut.push({
-                                nameTexts: nameTexts,
-                                cells: cells,
-                                fullText: fullText,
-                                lastValColIdx: lastValColIdx
-                            });
+                        let cellEls = Array.from(tr.querySelectorAll('th, td')).filter(isVisible);
+                        if (cellEls.length === 0) {
+                            cellEls = Array.from(tr.querySelectorAll('th, td'));
                         }
-                    }
+                        const cells = cellEls.map(c => clean(c.innerText));
 
-                    const cardCandidates = Array.from(
-                        document.querySelectorAll('[role="row"], li, .price-row, .row, div')
-                    );
-                    for (const el of cardCandidates) {
-                        if (!isVisible(el)) continue;
-                        const fullText = clean(el.innerText);
-                        if (!fullText || fullText.length > 350) continue;
-
-                        const childCells = Array.from(el.children).filter(
-                            c => isVisible(c) && clean(c.innerText).length > 0
-                        );
-                        if (childCells.length < 2 || childCells.length > 10) continue;
-
-                        const cells = childCells.map(c => clean(c.innerText));
                         const key = `${fullText}||${cells.join('|')}`;
                         if (seenKeys.has(key)) continue;
                         seenKeys.add(key);
 
                         rowsOut.push({
-                            nameTexts: cells,
+                            nameTexts: nameTexts,
                             cells: cells,
                             fullText: fullText,
-                            lastValColIdx: -1
+                            lastValColIdx: lastValColIdx
                         });
                     }
+                }
 
-                    return rowsOut;
-                }"""
-            )
+                const cardCandidates = Array.from(
+                    document.querySelectorAll('[role="row"], li, .price-row, .row, div')
+                );
+                for (const el of cardCandidates) {
+                    if (!isVisible(el)) continue;
+                    const fullText = clean(el.innerText);
+                    if (!fullText || fullText.length > 350) continue;
 
-            browser.close()
+                    const childCells = Array.from(el.children).filter(
+                        c => isVisible(c) && clean(c.innerText).length > 0
+                    );
+                    if (childCells.length < 2 || childCells.length > 10) continue;
+
+                    const cells = childCells.map(c => clean(c.innerText));
+                    const key = `${fullText}||${cells.join('|')}`;
+                    if (seenKeys.has(key)) continue;
+                    seenKeys.add(key);
+
+                    rowsOut.push({
+                        nameTexts: cells,
+                        cells: cells,
+                        fullText: fullText,
+                        lastValColIdx: -1
+                    });
+                }
+
+                return rowsOut;
+            }"""
+        )
 
         for target in items_to_scrape:
             search_terms = self.aliases.get(target) or [target]
@@ -267,4 +357,42 @@ class ServatmandiScraperModel:
             else:
                 print(f"  [Warning] Could not find 'آخرین مقدار' for: {target}")
 
+        if self.headless or not self.keep_open:
+            self.close_browser()
+
         return results
+
+    def wait_until_closed(self) -> None:
+        if not self._browser:
+            return
+        print("Browser window is open. Close it when you are done...")
+        try:
+            while self._browser is not None and self._browser.is_connected():
+                if self._page is not None:
+                    try:
+                        self._page.wait_for_timeout(500)
+                    except Exception:
+                        break
+                else:
+                    time.sleep(0.5)
+        except Exception:
+            pass
+        finally:
+            self.close_browser()
+
+    def close_browser(self) -> None:
+        for obj, method in (
+            (self._page, "close"),
+            (self._context, "close"),
+            (self._browser, "close"),
+            (self._playwright, "stop"),
+        ):
+            if obj is not None:
+                try:
+                    getattr(obj, method)()
+                except Exception:
+                    pass
+        self._page = None
+        self._context = None
+        self._browser = None
+        self._playwright = None

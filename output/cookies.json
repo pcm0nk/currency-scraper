@@ -1,0 +1,27 @@
+[
+  {
+    "domain": "servatmandi.com",
+    "hostOnly": true,
+    "httpOnly": true,
+    "name": "__Sec-a",
+    "path": "/",
+    "sameSite": "no_restriction",
+    "secure": true,
+    "session": true,
+    "storeId": null,
+    "value": "CfDJ8JmP3EBfpQdCp0j_r138yJ32taJe3Os56yHRf1AS3gngS5SKFoYSfQ4cvJZcsa6n65KETo5wTGyDiCwaiSSBIYZt4V85q2XtMqwSrQAsZSIDPdQdiPmeQq50_ZmVODrkp2ZVpZq0NWWL5jizQ6xNSoE"
+  },
+  {
+    "domain": "servatmandi.com",
+    "expirationDate": 1803088853.595095,
+    "hostOnly": true,
+    "httpOnly": true,
+    "name": "__Sec-i",
+    "path": "/",
+    "sameSite": "no_restriction",
+    "secure": true,
+    "session": false,
+    "storeId": null,
+    "value": "CfDJ8JmP3EBfpQdCp0j_r138yJ0QE4iljKvf77tj0FIs2w7nh31DhLbVABx8UPNEeUG7XaTIKiM7QS6gbUE3tEoCblk_FHGms_aA01SHchUs7inVHOnP6vTQKim2SwtV3mKRtDaeONYrCJ7aQOXqnnHI-RXOC98ALE4-oW7froO7rsHhmMpuuyRWFYmWVu07xHs36eU08C7Arpvi1HL4yhtdEAn-ach8OZpthu5LbiWW7Hp-IpUtl-fXVuWZ7oDon76SEFLZp8RvHHUDfsp3Q1BjWGXHyobQtqb-iuSXR4H9Q-6Fj5JEaFt_Y2G41WvCb2i6fiuwt_mxQBhfeaujRVM3J_da9aGmtZMd-RentusXOnebgJOldrBr5ByVCcTQsqDfiinb6sL3FCG4w9bs4BJhwpkR44BzypSwssUaqEcvy6bg3MH-GGDnuZdWc2L4PjdYfuZK4w1hyIWqspe1B31veGQsGzA7Hoe0RdpDLORFuJimd9rWSNz_A29rJw264DmFx5QGqvSuzt_AQicuOdXxqTe22zS8a-WebZn7BQg7_fKVytFArEAXeeO7o0t4GdVzsQ"
+  }
+]

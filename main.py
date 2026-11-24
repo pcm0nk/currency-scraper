@@ -12,6 +12,8 @@ def main() -> None:
         targets=config.SCRAPE_TARGETS,
         aliases=getattr(config, "SCRAPE_ALIASES", None),
         multipliers=getattr(config, "ITEM_MULTIPLIERS", None),
+        headless=getattr(config, "HEADLESS_BROWSER", False),
+        keep_open=getattr(config, "KEEP_BROWSER_OPEN", True),
     )
     history = HistoryModel(
         excel_path=config.EXCEL_FILE,
@@ -19,8 +21,8 @@ def main() -> None:
         targets=config.SCRAPE_TARGETS,
     )
     text_maker = TextMakerModel(
-        item_affixes=config.ITEM_TEXT_AFFICES,
-        report_title=config.REPORT_TITLE,
+        item_affixes=getattr(config, "ITEM_TEXT_AFFICES", None),
+        report_title=getattr(config, "REPORT_TITLE", "نرخ های مهم"),
     )
     view = ExcelView(
         excel_path=config.EXCEL_FILE,
@@ -45,6 +47,7 @@ def main() -> None:
         report_targets=config.REPORT_TARGETS,
     )
     controller.run_daily_capture()
+    scraper.wait_until_closed()
 
 
 if __name__ == "__main__":

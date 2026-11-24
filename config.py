@@ -86,6 +86,10 @@ COLOR_CHANGE_WITH_DIRECTION = False
 # Table reading direction: "ltr" or "rtl"
 TABLE_DIRECTION = "rtl"
 
+# Browser window behavior when scraping
+HEADLESS_BROWSER = True
+KEEP_BROWSER_OPEN = False
+
 # Theme colors (hex strings): alternating white and blue rows with white text
 THEME_COLORS = {
     "header_bg": "#4472C4",
