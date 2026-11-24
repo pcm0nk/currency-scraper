@@ -1,99 +1,88 @@
 import re
-from typing import Dict, List
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from typing import Dict, List, Optional
+from playwright.sync_api import sync_playwright
 
 
-PERSIAN_TO_ENGLISH_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
-
-
-def parse_market_number(raw_text: str) -> float:
-    """
-    Converts Persian/Arabic digits and formatted strings (e.g., '۴,۵۲۰,۰۰۰')
-    into a standard float.
-    """
-    if not raw_text:
-        raise ValueError("Empty value cannot be parsed as a number.")
-
-    normalized = raw_text.translate(PERSIAN_TO_ENGLISH_DIGITS)
-    # Remove thousands commas, spaces, and currency/symbol noise
-    normalized = normalized.replace(",", "").replace("٬", "").strip()
-    match = re.search(r"-?\d+(?:\.\d+)?", normalized)
-    if not match:
-        raise ValueError(f"Could not extract numeric value from: '{raw_text}'")
-    return float(match.group(0))
+PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
 
 class ServatmandiScraperModel:
-    def __init__(self, url: str, targets: List[str], timeout_ms: int = 30000):
+    def __init__(self, url: str, targets: List[str], headless: bool = True, timeout_ms: int = 30000):
         self.url = url
         self.targets = targets
+        self.headless = headless
         self.timeout_ms = timeout_ms
 
-    def fetch_prices(self) -> Dict[str, float]:
-        """
-        Loads the homepage and extracts the 'آخرین مقدار' (latest value)
-        for each target item.
-        """
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        cleaned = text.replace("\u200c", " ").replace("\u200f", " ")
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    @classmethod
+    def _parse_number(cls, raw_text: str) -> Optional[float]:
+        normalized = cls._normalize_text(raw_text).translate(PERSIAN_DIGITS)
+        match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", normalized)
+        if not match:
+            return None
+        num_str = match.group(0).replace(",", "")
+        try:
+            return float(num_str)
+        except ValueError:
+            return None
+
+    def scrape_prices(self, targets: Optional[List[str]] = None) -> Dict[str, float]:
+        items_to_scrape = targets if targets is not None else self.targets
         results: Dict[str, float] = {}
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                locale="fa-IR",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
+            browser = p.chromium.launch(headless=self.headless)
+            page = browser.new_page()
+            page.set_default_timeout(self.timeout_ms)
+            page.goto(self.url, wait_until="domcontentloaded")
+            page.wait_for_timeout(2500)
+
+            extracted = page.evaluate(
+                """() => {
+                    const rows = Array.from(document.querySelectorAll('tr, .price-row, .row, li, div'));
+                    const pairs = [];
+                    for (const el of rows) {
+                        if (el.children.length >= 2 && el.children.length <= 8) {
+                            const texts = Array.from(el.children)
+                                .map(c => (c.innerText || '').trim())
+                                .filter(Boolean);
+                            if (texts.length >= 2) {
+                                pairs.push(texts);
+                            }
+                        }
+                    }
+                    return pairs;
+                }"""
             )
-            page = context.new_page()
 
-            try:
-                page.goto(self.url, wait_until="networkidle", timeout=self.timeout_ms)
-                # Wait until at least the first target label is rendered in DOM
-                page.get_by_text(self.targets[0], exact=False).first.wait_for(
-                    timeout=self.timeout_ms
-                )
-                # Small buffer for live websocket/XHR price ticks to populate
-                page.wait_for_timeout(1500)
+            browser.close()
 
-                for item_name in self.targets:
-                    raw_price = self._extract_item_latest_value(page, item_name)
-                    results[item_name] = parse_market_number(raw_price)
+        normalized_pairs = [
+            [self._normalize_text(t) for t in row if self._normalize_text(t)]
+            for row in extracted
+        ]
 
-            except PlaywrightTimeoutError as exc:
-                raise RuntimeError(f"Timed out loading {self.url}: {exc}") from exc
-            finally:
-                browser.close()
+        for target in items_to_scrape:
+            norm_target = self._normalize_text(target)
+            parsed_val: Optional[float] = None
+
+            for row_texts in normalized_pairs:
+                if any(norm_target in cell or cell in norm_target for cell in row_texts):
+                    for cell in reversed(row_texts):
+                        if cell == norm_target:
+                            continue
+                        val = self._parse_number(cell)
+                        if val is not None:
+                            parsed_val = val
+                            break
+                if parsed_val is not None:
+                    break
+
+            if parsed_val is not None:
+                results[target] = parsed_val
 
         return results
-
-    def _extract_item_latest_value(self, page, item_name: str) -> str:
-        """
-        Finds the smallest ancestor container around `item_name` that includes
-        numeric price text, then returns the first numeric value after the label.
-        """
-        label_locator = page.get_by_text(item_name, exact=True).first
-        label_locator.wait_for(timeout=self.timeout_ms)
-
-        # Check ancestors from closest parent upward to find the row/card holding the price
-        ancestors = label_locator.locator("xpath=ancestor::*")
-        count = ancestors.count()
-
-        for i in range(count - 1, -1, -1):
-            candidate = ancestors.nth(i)
-            try:
-                text = candidate.inner_text().strip()
-            except Exception:
-                continue
-
-            if not text or len(text) > 250:
-                continue
-
-            if item_name in text and re.search(r"[0-9۰-۹]", text):
-                after_label = text.split(item_name, 1)[-1]
-                tokens = re.findall(r"[0-9۰-۹][0-9۰-۹,٬.]*", after_label)
-                if tokens:
-                    return tokens[0]
-
-        raise LookupError(f"Could not find latest price cell for '{item_name}'.")

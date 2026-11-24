@@ -4,6 +4,7 @@ URL = "https://servatmandi.com/"
 
 # Table reading direction on Daily_Report: "ltr" (left-to-right) or "rtl" (right-to-left)
 TABLE_DIRECTION = "rtl"  # or "ltr"
+REPORT_TITLE = "نرخ های مهم"
 # Exact column order on the report sheet (follows this order as written)
 REPORT_COLUMNS = [
     "item",
@@ -32,25 +33,44 @@ REPORT_HEADERS = {
     "change_pct": "تغییر %",
 }
 
-# Items scraped from the homepage
+# Base item keys used for scraping, history tracking, and calculations
 SCRAPE_TARGETS = [
+    "تتر",
+    "دلار آمریکا",
+    "شاخص کل بورس",
+    "سکه امامی",
+    "نقره 999",
     "طلا 18 عیار",
     "انس طلا",
-    "تتر",
     "بیت‌کوین",
     "اتریوم",
-    "دلار آمریکا",
 ]
 
-# Items displayed on the themed report sheet (add or deduct freely)
+# Items included in report calculations and display
 REPORT_TARGETS = [
+    "تتر",
+    "دلار آمریکا",
+    "شاخص کل بورس",
+    "سکه امامی",
+    "نقره 999",
     "طلا 18 عیار",
     "انس طلا",
-    "تتر",
     "بیت‌کوین",
     "اتریوم",
-    "دلار آمریکا",
 ]
+
+# Optional pretext (prefix) and post-text (suffix) per item for display
+ITEM_TEXT_AFFICES = {
+    "تتر": {"prefix": "دلار آمریکا ", "suffix": "(تتر-ریال)"},
+    "دلار آمریکا": {"prefix": "", "suffix": " (آزاد-ریال)"},
+    "شاخص کل بورس": {"prefix": "", "suffix": ""},
+    "سکه امامی": {"prefix": "", "suffix": " (ریال)"},
+    "نقره 999": {"prefix": "", "suffix": "(ریال)"},
+    "طلا 18 عیار": {"prefix": "", "suffix": " هر گرم (ریال)"},
+    "انس طلا": {"prefix": "($) ", "suffix": "انس جهانی"},
+    "بیت‌کوین": {"prefix": "($) ", "suffix": "بیت کوین"},
+    "اتریوم": {"prefix": "($) ", "suffix": "اتریوم"},
+}
 
 OUTPUT_DIR = Path("output")
 EXCEL_FILE = OUTPUT_DIR / "market_tracker.xlsx"

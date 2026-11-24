@@ -4,15 +4,15 @@ from typing import Dict, List, Optional
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-
+from models.text_maker_model import TextMakerModel
 
 DEFAULT_REPORT_HEADERS: Dict[str, str] = {
-    "item": "Item",
-    "current": "Current",
-    "previous": "Previous",
-    "trend": "Trend",
-    "change": "Change",
-    "change_pct": "Change %",
+    "item": "شرح نرخ",
+    "current": "نرخ فعلی",
+    "previous": "نرخ قبلی",
+    "trend": "روند",
+    "change": "تغییر",
+    "change_pct": "درصد تغییر",
 }
 
 DEFAULT_REPORT_COLUMNS: List[str] = [
@@ -70,10 +70,13 @@ class ExcelView:
         report_headers: Optional[Dict[str, str]] = None,
         report_columns: Optional[List[str]] = None,
         column_widths: Optional[Dict[str, Optional[float]]] = None,
+        item_affixes: Optional[Dict[str, Dict[str, str]]] = None,
+        report_title: Optional[str] = None,
         show_number_change: bool = True,
         show_pct_change: bool = True,
         color_change_with_direction: bool = True,
         direction: str = "ltr",
+        text_maker: Optional[TextMakerModel] = None
     ):
         self.excel_path = excel_path
         self.history_sheet_name = history_sheet_name
@@ -86,11 +89,17 @@ class ExcelView:
             if report_columns is not None
             else list(DEFAULT_REPORT_COLUMNS)
         )
+        self.text_maker = text_maker or TextMakerModel(
+            item_affixes=item_affixes,
+            report_title=report_title,
+        )
+        self.column_widths = column_widths or {}
+        self.item_affixes = item_affixes or {}
+        self.report_title = report_title
         self.show_number_change = show_number_change
         self.show_pct_change = show_pct_change
         self.color_change_with_direction = color_change_with_direction
-        self.column_widths = column_widths or {}
-        
+
         normalized_dir = direction.strip().lower()
         if normalized_dir not in ("ltr", "rtl"):
             raise ValueError(
@@ -101,6 +110,12 @@ class ExcelView:
     @property
     def is_rtl(self) -> bool:
         return self.direction == "rtl"
+
+    def _format_item_label(self, raw_item: str) -> str:
+        affix = self.item_affixes.get(raw_item, {})
+        prefix = affix.get("prefix", "")
+        suffix = affix.get("suffix", "")
+        return f"{prefix}{raw_item}{suffix}"
 
     def ensure_file_unlocked(self) -> None:
         """
@@ -183,7 +198,10 @@ class ExcelView:
             ws = wb.create_sheet(title=self.report_sheet_name)
 
         ws.sheet_view.rightToLeft = self.is_rtl
-
+        title_text = self.text_maker.format_report_title(
+            report_date_str=report_date_str,
+            previous_date_str=previous_date_str,
+        )
         valid_keys = set(DEFAULT_REPORT_COLUMNS)
         header_specs = []
         for col_key in self.report_columns:
@@ -196,13 +214,16 @@ class ExcelView:
             header_specs.append((col_key, self.headers_map[col_key]))
 
         headers = [label for _, label in header_specs]
-        num_cols = len(headers)
+        num_cols = max(len(headers), 1)
 
         # Title banner (Row 1)
         prev_label = previous_date_str if previous_date_str else "N/A"
-        title_text = f"Daily Market Report — {report_date_str} (vs. {prev_label})"
+        if self.report_title:
+            title_text = f"{self.report_title} — {report_date_str} (vs. {prev_label})"
+        else:
+            title_text = f"Daily Market Report — {report_date_str} (vs. {prev_label})"
 
-        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(num_cols, 1))
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
         title_cell = ws.cell(row=1, column=1, value=title_text)
         title_cell.font = Font(
             name="Calibri",
@@ -296,7 +317,7 @@ class ExcelView:
             direction_symbol = entry.get("direction", "—")
 
             values_by_key: Dict[str, object] = {
-                "item": entry["item"],
+                "item": self.text_maker.format_item_label(entry["item"]),
                 "current": today_val if today_val is not None else "N/A",
                 "previous": yest_val if yest_val is not None else "N/A",
                 "trend": direction_symbol,
