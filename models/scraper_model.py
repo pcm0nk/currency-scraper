@@ -80,7 +80,6 @@ class ServatmandiScraperModel:
             page.goto(self.url, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
 
-            # Scroll through the page so lower sections/watchlists load and populate
             page.evaluate(
                 r"""async () => {
                     const step = Math.max(400, Math.floor(window.innerHeight * 0.8));
@@ -153,7 +152,6 @@ class ServatmandiScraperModel:
                         }
                     }
 
-                    // Also capture visible non-table row/card containers
                     const cardCandidates = Array.from(
                         document.querySelectorAll('[role="row"], li, .price-row, .row, div')
                     );
@@ -184,88 +182,119 @@ class ServatmandiScraperModel:
                 }"""
             )
 
-            browser.close()
+            for target in items_to_scrape:
+                search_terms = self.aliases.get(target) or [target]
+                if target not in search_terms:
+                    search_terms = [target] + search_terms
 
-        for target in items_to_scrape:
-            search_terms = self.aliases.get(target) or [target]
-            if target not in search_terms:
-                search_terms = [target] + search_terms
+                excluded_terms = [
+                    self._normalize_for_match(ex)
+                    for ex in EXCLUDED_TERMS_BY_TARGET.get(target, [])
+                ]
 
-            excluded_terms = [
-                self._normalize_for_match(ex)
-                for ex in EXCLUDED_TERMS_BY_TARGET.get(target, [])
-            ]
+                parsed_val: Optional[float] = None
+                is_dollar = target == "دلار آمریکا"
 
-            parsed_val: Optional[float] = None
+                if is_dollar:
+                    print(f"\n--- STEP 1: Total extracted rows = {len(extracted)} ---")
+                    dollar_rows = [
+                        r for r in extracted if "دلار" in self._normalize_for_match(r["fullText"])
+                    ]
+                    print(f"--- STEP 2: Rows containing 'دلار' = {len(dollar_rows)} ---")
+                    for idx, r in enumerate(dollar_rows):
+                        print(
+                            f"  Row[{idx}]: colIdx={r.get('lastValColIdx')} | "
+                            f"cells={r['cells']} | fullText={r['fullText']}"
+                        )
 
-            for term in search_terms:
-                norm_term = self._normalize_for_match(term)
+                for term in search_terms:
+                    norm_term = self._normalize_for_match(term)
 
-                for row in extracted:
-                    norm_full = self._normalize_for_match(row["fullText"])
-                    if norm_term not in norm_full:
-                        continue
-                    if any(ex and ex in norm_full for ex in excluded_terms):
-                        continue
-
-                    raw_cells = [self._normalize_text(c) for c in row["cells"]]
-                    norm_cells = [self._normalize_for_match(c) for c in raw_cells]
-
-                    has_label = any(
-                        self._is_valid_label_text(nc, norm_term, excluded_terms)
-                        for nc in norm_cells
-                    ) or any(
-                        self._is_valid_label_text(self._normalize_for_match(n), norm_term, excluded_terms)
-                        for n in row.get("nameTexts", [])
-                    )
-                    if not has_label:
-                        continue
-
-                    label_cell_indices = {
-                        i
-                        for i, nc in enumerate(norm_cells)
-                        if norm_term in nc
-                    }
-
-                    col_idx = row.get("lastValColIdx", -1)
-
-                    # 1. Use 'آخرین مقدار' / 'آخرین قیمت' column index if valid and not a label cell
-                    if 0 <= col_idx < len(raw_cells) and col_idx not in label_cell_indices:
-                        val = self._parse_number(raw_cells[col_idx])
-                        if val is not None:
-                            parsed_val = val
-                            break
-
-                    # 2. First valid price cell after the label cell
-                    max_label_idx = max(label_cell_indices) if label_cell_indices else -1
-                    for i in range(max_label_idx + 1, len(raw_cells)):
-                        if i in label_cell_indices:
+                    for row in extracted:
+                        norm_full = self._normalize_for_match(row["fullText"])
+                        if norm_term not in norm_full:
                             continue
-                        val = self._parse_number(raw_cells[i])
-                        if val is not None:
-                            parsed_val = val
-                            break
 
-                    # 3. Fallback across any other non-label cell in the row
-                    if parsed_val is None:
-                        for i, c in enumerate(raw_cells):
-                            if i in label_cell_indices:
-                                continue
-                            val = self._parse_number(c)
+                        if any(ex and ex in norm_full for ex in excluded_terms):
+                            if is_dollar:
+                                print(f"  [STEP 3 - SKIPPED EXCLUDED]: {row['fullText']}")
+                            continue
+
+                        raw_cells = [self._normalize_text(c) for c in row["cells"]]
+                        norm_cells = [self._normalize_for_match(c) for c in raw_cells]
+
+                        has_label = any(
+                            self._is_valid_label_text(nc, norm_term, excluded_terms)
+                            for nc in norm_cells
+                        ) or any(
+                            self._is_valid_label_text(
+                                self._normalize_for_match(n), norm_term, excluded_terms
+                            )
+                            for n in row.get("nameTexts", [])
+                        )
+                        if not has_label:
+                            if is_dollar:
+                                print(f"  [STEP 4 - NO VALID LABEL]: cells={raw_cells}")
+                            continue
+
+                        label_cell_indices = {
+                            i
+                            for i, nc in enumerate(norm_cells)
+                            if norm_term in nc
+                        }
+
+                        col_idx = row.get("lastValColIdx", -1)
+
+                        if 0 <= col_idx < len(raw_cells) and col_idx not in label_cell_indices:
+                            val = self._parse_number(raw_cells[col_idx])
+                            if is_dollar:
+                                print(
+                                    f"  [STEP 5a - colIdx {col_idx}]: raw='{raw_cells[col_idx]}' -> parsed={val}"
+                                )
                             if val is not None:
                                 parsed_val = val
                                 break
+
+                        max_label_idx = max(label_cell_indices) if label_cell_indices else -1
+                        for i in range(max_label_idx + 1, len(raw_cells)):
+                            if i in label_cell_indices:
+                                continue
+                            val = self._parse_number(raw_cells[i])
+                            if is_dollar:
+                                print(
+                                    f"  [STEP 5b - after label cell[{i}]]: raw='{raw_cells[i]}' -> parsed={val}"
+                                )
+                            if val is not None:
+                                parsed_val = val
+                                break
+
+                        if parsed_val is None:
+                            for i, c in enumerate(raw_cells):
+                                if i in label_cell_indices:
+                                    continue
+                                val = self._parse_number(c)
+                                if is_dollar:
+                                    print(
+                                        f"  [STEP 5c - fallback cell[{i}]]: raw='{c}' -> parsed={val}"
+                                    )
+                                if val is not None:
+                                    parsed_val = val
+                                    break
+
+                        if parsed_val is not None:
+                            break
 
                     if parsed_val is not None:
                         break
 
                 if parsed_val is not None:
-                    break
+                    factor = self.multipliers.get(target, 1.0)
+                    results[target] = parsed_val * factor
+                    if is_dollar:
+                        print(f"--- STEP 6 - FINAL دلار آمریکا VALUE: {results[target]} ---\n")
+                else:
+                    print(f"  [Warning] Could not find 'آخرین مقدار' for: {target}")
 
-            if parsed_val is not None:
-                factor = self.multipliers.get(target, 1.0)
-                results[target] = parsed_val * factor
-            else:
-                print(f"  [Warning] Could not find 'آخرین مقدار' for: {target}")
+            browser.close()
 
         return results
